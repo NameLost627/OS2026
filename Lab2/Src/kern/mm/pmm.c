@@ -62,6 +62,80 @@ size_t nr_free_pages(void) {
 }
 
 //lab2 function1 YOUR CODE
+/* page_init - build the Page descriptor array and register the free memory.
+ *
+ * The physical memory range comes from the device tree.  The kernel is linked
+ * at KERNBASE but loaded at KERNEL_BEGIN_PADDR, so a kernel virtual address
+ * (kva) always maps to (kva - va_pa_offset).  Only page frames [nbase, npage)
+ * can be described by pages[], and the space occupied by OpenSBI, the kernel
+ * image and the descriptor array itself must never enter the free area.
+ */
+static void page_init(void) {
+    extern char end[];                  // first byte after the kernel image
+    uint64_t mem_base, mem_size, mem_end;
+    uintptr_t pages_end, pages_end_pa, free_start_pa;
+    size_t nr_page, free_pages, i;
+
+    // the kernel is linked at KERNBASE and loaded at KERNEL_BEGIN_PADDR
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    // physical memory range reported by the device tree
+    mem_base = get_memory_base();
+    mem_size = get_memory_size();
+    if (mem_base == 0 || mem_size == 0) {
+        panic("page_init: no valid memory information from DTB");
+    }
+    mem_end = mem_base + mem_size;
+    if (mem_end <= mem_base) {
+        panic("page_init: invalid memory range [0x%lx, 0x%lx)", mem_base, mem_end);
+    }
+    cprintf("physical memory: [0x%016lx, 0x%016lx), %lu MB\n",
+            mem_base, mem_end, mem_size / (1024 * 1024));
+
+    // npage is the exclusive upper bound of the manageable page number.
+    // A trailing partial page is not manageable, so it is rounded down.
+    npage = PPN(mem_end);
+    if (npage <= nbase) {
+        panic("page_init: no manageable page (npage=0x%lx, nbase=0x%lx)",
+              npage, nbase);
+    }
+
+    // pages[] is placed right after the kernel image: pages is a virtual
+    // address, PADDR(pages) is its physical address, and nr_page descriptors
+    // cover the page frames nbase .. npage-1
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+    nr_page = npage - nbase;
+    pages_end = (uintptr_t)pages + nr_page * sizeof(struct Page);
+    pages_end_pa = PADDR(pages_end);
+    if (pages_end_pa > mem_end) {
+        panic("page_init: Page array does not fit in physical memory");
+    }
+
+    // reserve every page frame first; init_memmap() releases the free ones
+    for (i = 0; i < nr_page; i ++) {
+        struct Page *p = pages + i;
+        p->flags = 0;
+        p->property = 0;
+        set_page_ref(p, 0);
+        SetPageReserved(p);
+    }
+    cprintf("npage: 0x%lx, pages: 0x%016lx (PA 0x%016lx)\n",
+            npage, (uintptr_t)pages, PADDR((uintptr_t)pages));
+
+    // the free area starts at the first complete page after the Page array,
+    // so OpenSBI, the kernel image and the array itself stay reserved
+    free_start_pa = ROUNDUP(pages_end_pa, PGSIZE);
+    if (free_start_pa >= mem_end) {
+        cprintf("page_init: no free page available\n");
+        return;
+    }
+
+    free_pages = npage - PPN(free_start_pa);
+    cprintf("free memory: [0x%016lx, 0x%016lx), %lu pages\n",
+            free_start_pa, mem_end, free_pages);
+
+    init_memmap(pa2page(free_start_pa), free_pages);
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
